@@ -174,6 +174,7 @@ canvas{display:block;width:100%;height:104px}
       <label class="row"><input type="checkbox" id="affect"> 내 말투의 감정에 맞춰 말하기</label>
       <label class="row"><input type="checkbox" id="search"> 모르는 건 구글에서 찾아보기</label>
       <label class="row"><input type="checkbox" id="nudge"> 내가 조용하면 먼저 수다 떨기</label>
+      <label class="row"><input type="checkbox" id="always"> 계속 켜 두기 (조용하면 쉬었다가, 말하면 깨어나요)</label>
       <label>모델 이름 <input type="text" id="model" spellcheck="false"></label>
       <div class="mem">
         <h3>사만다가 기억하는 것</h3>
@@ -223,7 +224,7 @@ canvas{display:block;width:100%;height:104px}
     key: store.get('key', ''), voice: store.get('voice', 'Sulafat'), patience: store.get('patience', 'normal'),
     affect: store.get('affect', true), search: store.get('search', true), model: store.get('model', 'gemini-3.8-live'),
     memory: store.get('memory', []), diary: store.get('diary', []), style: store.get('style', 'jondaet'),
-    nudge: store.get('nudge', true), firstMet: store.get('firstMet', 0), talks: store.get('talks', 0),
+    nudge: store.get('nudge', true), always: store.get('always', true), firstMet: store.get('firstMet', 0), talks: store.get('talks', 0),
     // ?mode= comes from the home-screen shortcuts ("친구 모드", "비서 모드")
     mode: (new URLSearchParams(location.search).get('mode') || store.get('mode', 'friend')) === 'assistant' ? 'assistant' : 'friend',
   };
@@ -239,7 +240,7 @@ canvas{display:block;width:100%;height:104px}
     ['Charon', '설명하는'], ['Rasalgethi', '설명하는'], ['Sadaltager', '박식한']];
 
   /* ---------- state ---------- */
-  const LABEL = { off: '쉬는 중', connecting: '연결 중', listening: '듣는 중', speaking: '말하는 중', wrapping: '오늘 대화 정리 중' };
+  const LABEL = { off: '쉬는 중', dozing: '조용히 기다리는 중', connecting: '연결 중', listening: '듣는 중', speaking: '말하는 중', wrapping: '오늘 대화 정리 중' };
   let state = 'off';
   function setState(s) { state = s; document.body.dataset.state = s; $('stateLabel').textContent = LABEL[s] + (cfg.mode === 'assistant' ? ' · 비서 모드' : ''); if (reduced) drawWave(); }
   function note(msg) { notice.textContent = msg; notice.hidden = !msg; if (msg) trace('안내: ' + msg); }
@@ -542,10 +543,17 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   let micAc = null, ac = null, playGain = null, analyser = null, micStream = null, micSrc = null, micNode = null, micSink = null;
   let muted = false, micLevel = 0, lastVoiceAt = 0, awaiting = false;
   function b64(buf) { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); }
+  // While the line is closed (she dozes, or it is being replaced) the sound is kept and sent once she is back,
+  // so the first words after waking her are not lost.
+  const preroll = []; let loud = 0;
+  const audioMsg = pcm => ({ realtimeInput: { audio: { data: b64(pcm), mimeType: 'audio/pcm;rate=16000' } } });
   function onMic(pcm, rms) {
     micLevel = muted ? 0 : rms; if (!muted) meterMic(rms, sources.size > 0);
     if (!muted && rms > 0.02 && !sources.size) { lastVoiceAt = now(); awaiting = true; spoke = true; nudged = 0; clearTimeout(nudgeTimer); }
-    if (ready && !muted) send({ realtimeInput: { audio: { data: b64(pcm), mimeType: 'audio/pcm;rate=16000' } } });
+    if (muted || !live) return;
+    if (ready) return send(audioMsg(pcm));
+    preroll.push(pcm); if (preroll.length > (dozing ? 30 : 200)) preroll.shift();   // 1.5 s while dozing, 10 s while waking
+    if (dozing) { loud = rms > 0.025 ? loud + 1 : 0; if (loud >= 3) wakeUp(); }
   }
   async function startAudio() {
     if (!ac) {                                        // her voice first, so she can still speak when the microphone is refused
@@ -589,7 +597,8 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   /* ---------- sound out ---------- */
   const sources = new Set(); let nextTime = 0;
   function playChunk(data) {
-    if (!ac || wrapping) return;
+    if (!ac || wrapping || napping) return;
+    touch();
     const bin = atob(data), n = bin.length >> 1; if (!n) return;
     const buf = ac.createBuffer(1, n, 24000), f = buf.getChannelData(0);
     for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 32768) v -= 65536; f[i] = v / 32768; }
@@ -665,6 +674,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     if (!gotSetup && usedHandle) { handle = null; return connect(); }          // the saved session expired
     // Some options are refused at setup; others pass it and are refused (1007) at the first words, before she answers.
     if ((!gotSetup || (e.code === 1007 && !answered)) && stepDown(e)) { if (gotSetup) resend = lastSent; return connect(); }
+    if (cfg.always && (gotSetup || !e.reason)) return later(e);              // always on: keep coming back
     if (!gotSetup) return fail(explain(e));
     if (++retries <= 3) return connect();                                      // routine: a connection lasts about ten minutes
     fail('연결이 자꾸 끊겨요. 인터넷을 확인하고 다시 시작해 주세요. ' + explain(e));
@@ -679,12 +689,23 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     return '구글에 연결하지 못했어요. ' + tip + (r ? ' (구글이 보낸 이유: ' + r + ')' : ' (코드 ' + ((e && e.code) || '없음') + ')');
   }
   function fail(msg) { stop(); note(msg); }
+  function later(e) {                               // wait a little longer each time; right away the first time (a routine swap)
+    const r = (e && e.reason) || '';
+    if (/api key|api_key|permission|unauth/i.test(r)) return fail(explain(e));
+    const quota = /quota|exhaust|rate|billing/i.test(r);
+    const wait = quota ? 60000 : retries++ ? Math.min(30000, 1000 * 2 ** Math.min(retries, 5)) : 0;
+    if (quota) note('무료 사용량 한도에 걸렸어요. 1분마다 다시 붙어 볼게요.'); else if (retries > 2) note('연결이 끊겨서 다시 붙는 중이에요.');
+    setState('connecting'); clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => { if (live && !ws && !dozing) connect(); }, wait);
+  }
 
   function onServer(m) {
     if (m.setupComplete) {
       gotSetup = true; ready = true; setState('listening'); setControls(); trace('연결됨');
       note([micMsg, droppedNote()].filter(Boolean).join(' '));
       if (micMsg) $('say').focus();
+      if (greeted && preroll.length) { trace('기다리는 동안 들은 소리 ' + (preroll.length * 0.05).toFixed(1) + '초 보냄'); for (const p of preroll) send(audioMsg(p)); }
+      preroll.length = 0;
       if (!greeted) { greeted = true; cfg.talks++; store.set('talks', cfg.talks); if (!queued) sendText(kickoff()); }
       if (queued) { const q = queued; queued = ''; sayText(q); }      // words typed before the line was open
       else if (resend) sendText(resend);                               // the last line refused them before she could answer
@@ -706,7 +727,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     if (sc.interrupted) { trace('끼어들기: 서버가 사만다 말을 멈춤'); stopPlayback(); if (saidOpen) logLine('사만다', saidText); saidOpen = false; }
     if (sc.inputTranscription && sc.inputTranscription.text) {
       if (heardDone) { heardText = ''; heardDone = false; heardLogged = false; }
-      heardText += sc.inputTranscription.text; heard.textContent = heardText.trim();
+      heardText += sc.inputTranscription.text; heard.textContent = heardText.trim(); touch();
     }
     if (sc.outputTranscription && sc.outputTranscription.text) {
       if (!saidOpen) { saidText = ''; saidOpen = true; }
@@ -731,7 +752,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
         else if (fc.name === 'close_screen') { closeScreen(); result = '닫았어요'; }
         else if (fc.name === 'remember') result = remember(String(a.fact || ''));
         else if (fc.name === 'forget') result = forget(String(a.keyword || ''));
-        else if (fc.name === 'save_diary') { result = saveDiary(a); if (wrapping) setTimeout(stop, 200); }
+        else if (fc.name === 'save_diary') { result = saveDiary(a); if (wrapping) setTimeout(stop, 200); else if (napping) setTimeout(fallAsleep, 200); }
         else if (fc.name === 'set_speech_style') result = setStyle(a.style);
         else if (fc.name === 'set_mode') result = setMode(a.mode);
         else result = '없는 도구예요';
@@ -740,6 +761,47 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     }
     send({ toolResponse: { functionResponses: out } });
   }
+
+  /* ---------- always on: rest when it is quiet, wake on speech ---------- */
+  // After two quiet minutes she notes the talk in her diary and closes the line to Google, so a quiet room costs nothing.
+  // The page keeps listening on its own; speech (or typing) brings her back, picking up the same session.
+  const IDLE_MS = 120000, FALSE_WAKE_MS = 20000;
+  let dozing = false, napping = false, idleTimer = null, napTimer = null, retryTimer = null;
+  function touch(ms) { clearTimeout(idleTimer); if (cfg.always && live && !dozing) idleTimer = setTimeout(doze, ms || IDLE_MS); }
+  function doze() {
+    if (!cfg.always || !live || dozing || napping || wrapping) return;
+    if (!ready || sources.size || nudgeAt > Date.now()) return touch();   // still busy, or about to bring something up
+    if (log.length >= 2) {
+      napping = true; trace('쉬기 전에 일기 정리');
+      sendText('(사용자가 한동안 조용해서 잠깐 쉬어요. 소리 내어 말하지 말고, save_diary 도구를 한 번 호출해서 지금까지 대화를 정리해요.)');
+      napTimer = setTimeout(fallAsleep, 7000);
+    } else fallAsleep();
+  }
+  function fallAsleep() {
+    clearTimeout(napTimer); napping = false;
+    if (!live || dozing || wrapping) return;
+    dozing = true; ready = false; clearTimeout(nudgeTimer); nudgeAt = 0;
+    if (ws) { const s = ws; ws = null; try { s.close(); } catch {} }
+    stopPlayback(); preroll.length = 0; loud = 0; sessionId = Date.now();
+    setState('dozing'); setControls(); trace('쉬는 중: 말하면 깨어나요');
+  }
+  function wakeUp() {
+    if (!dozing) return;
+    dozing = false; loud = 0; trace('깨어남'); clearTimeout(retryTimer); retries = 0; connect();
+    touch(FALSE_WAKE_MS);                           // a cough that woke her sends her back to rest soon; real talk extends it
+  }
+  addEventListener('online', () => { if (live && !ws && !dozing) { clearTimeout(retryTimer); retries = 0; connect(); } });
+  document.addEventListener('visibilitychange', async () => {     // back from another app or a dark screen
+    if (document.hidden || !live) return;
+    try { await ac.resume(); if (micAc) await micAc.resume(); } catch {}
+    try { if (!wake || wake.released) wake = await navigator.wakeLock.request('screen'); } catch {}
+    const track = micStream && micStream.getAudioTracks()[0];
+    if (micStream && (!track || track.readyState === 'ended')) {
+      trace('돌아와서 마이크 다시 켬'); stopAudio();
+      try { await startAudio(); } catch (err) { trace('마이크 다시 켜기 실패: ' + err.name); }
+    }
+    if (!ws && !dozing) { clearTimeout(retryTimer); retries = 0; connect(); }
+  });
 
   /* ---------- start and stop ---------- */
   let wake = null, micMsg = '';
@@ -751,7 +813,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   async function start() {
     if (!cfg.key) { toggleSettings(true); $('key').focus(); note('먼저 설정에 Gemini API 키를 넣어 주세요.'); return; }
     trace('— 대화 시작 —'); note(''); micMsg = ''; live = true; retries = 0; handle = null; greeted = false; muted = false; wrapping = false;
-    sessionId = Date.now(); log = []; spoke = false; nudged = 0; adoptPending(); renderMemory();
+    sessionId = Date.now(); log = []; spoke = false; nudged = 0; dozing = napping = false; preroll.length = 0; adoptPending(); renderMemory();
     if (!cfg.firstMet) { cfg.firstMet = Date.now(); store.set('firstMet', cfg.firstMet); }
     setControls(); setState('connecting');
     try { await startAudio(); }
@@ -767,7 +829,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     }
     if (!live) { stopAudio(); return; }
     try { wake = await navigator.wakeLock.request('screen'); } catch {}
-    connect();
+    connect(); touch();
   }
   // If you go quiet she keeps the talk going like a radio friend, a little less often each time, then rests until you speak.
   const NUDGE_AFTER = [12000, 20000, 30000, 45000, 60000, 90000, 120000, 180000];
@@ -778,11 +840,13 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     '네가 기억하는 사용자 얘기 하나와 이어지는 얘기를 꺼내요. 기억이 없으면 요즘 네가 붙잡고 있는 생각을 털어놔요.',
     '방금 한 얘기에 대한 네 속마음이나 의견을 한마디 덧붙여요.',
   ];
-  let lastKind = -1;
+  let lastKind = -1, nudgeAt = 0;
   function armNudge() {
     clearTimeout(nudgeTimer);
     if (!cfg.nudge || cfg.mode === 'assistant' || nudged >= NUDGE_AFTER.length || !live || !ready || wrapping) return;
+    nudgeAt = Date.now() + NUDGE_AFTER[nudged];
     nudgeTimer = setTimeout(() => {
+      nudgeAt = 0;
       if (!live || !ready || wrapping || sources.size || muted) return;
       let k; do { k = Math.floor(Math.random() * NUDGE_KINDS.length); } while (k === lastKind); lastKind = k;
       sendText('(사용자가 조용히 듣고 있어요. 재촉하지 말고, ' + NUDGE_KINDS[k] + ' 사용자에게 대답을 바라지 않아도 돼요.)');
@@ -799,6 +863,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   function stop() {
     if (live) trace('— 대화 끝 —');
     live = false; ready = false; wrapping = false; handle = null; queued = ''; clearInterval(swapTimer); clearTimeout(wrapTimer); clearTimeout(nudgeTimer);
+    dozing = napping = false; preroll.length = 0; clearTimeout(idleTimer); clearTimeout(napTimer); clearTimeout(retryTimer);
     if (ws) { const s = ws; ws = null; try { s.close(); } catch {} }
     stopPlayback(); stopAudio();
     try { wake && wake.release(); } catch {} wake = null;
@@ -812,7 +877,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   function sayText(t) {
     stopPlayback(); heard.textContent = t; heardDone = true; heardLogged = true; lastVoiceAt = now(); awaiting = true;
     if (saidOpen) { logLine('사만다', saidText); saidOpen = false; }
-    spoke = true; nudged = 0; clearTimeout(nudgeTimer); logLine('나', t);
+    spoke = true; nudged = 0; clearTimeout(nudgeTimer); logLine('나', t); touch();
     sendText(t);
   }
   function submitText() {
@@ -821,7 +886,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     $('say').value = '';
     if (ready) return sayText(t);
     queued = t; heard.textContent = t;                 // typing starts the conversation; sent as soon as she is connected
-    if (!live) start();
+    if (!live) start(); else if (dozing) wakeUp();
   }
   // Three ways in, because a page shown inside another app's preview may swallow form submission.
   // Whichever fires first empties the box, so the others find nothing to send.
@@ -851,6 +916,11 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   $('mode').addEventListener('change', e => {
     setMode(e.target.value);
     if (ready) sendText('(사용자가 설정에서 ' + (cfg.mode === 'assistant' ? '비서 모드로 바꿨어요. 지금부터 [비서 모드] 규칙을 따르고, "네, 비서 모드예요." 정도로만 짧게 답해요.)' : '친구 모드로 바꿨어요. 평소의 사만다로 돌아와서 반갑게 한마디 해요.)'));
+  });
+  $('always').checked = cfg.always;
+  $('always').addEventListener('change', e => {
+    cfg.always = e.target.checked; store.set('always', cfg.always);
+    if (cfg.always) touch(); else { clearTimeout(idleTimer); if (dozing) wakeUp(); }
   });
   $('nudge').addEventListener('change', e => { cfg.nudge = e.target.checked; store.set('nudge', cfg.nudge); if (!cfg.nudge) clearTimeout(nudgeTimer); });
   let wipeArmed = false;
