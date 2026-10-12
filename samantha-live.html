@@ -108,6 +108,15 @@ canvas{display:block;width:100%;height:104px}
 .mem li{display:flex;gap:8px;align-items:flex-start;font-size:13.5px}
 .mem li span{flex:1;min-width:0;overflow-wrap:anywhere}
 .mem p{margin:0;font-size:13px;color:var(--sheet-dim)}
+.tags{display:flex;flex-wrap:wrap;gap:6px}
+.tag{background:none;border:1px solid var(--sheet-rule);border-radius:999px;padding:3px 10px;font-size:12.5px;color:var(--sheet-ink);cursor:pointer}
+.tag[aria-pressed="true"]{background:var(--sheet-link);border-color:var(--sheet-link);color:var(--sheet)}
+.notelist{margin:0;padding:0;list-style:none;display:flex;flex-direction:column}
+.notelist li{border-top:1px solid var(--sheet-rule);padding:11px 0;display:flex;flex-direction:column;gap:5px}
+.notelist b{font-weight:600;font-size:15px}
+.notelist p{margin:0;font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere}
+.nmeta{font-size:12px;color:var(--sheet-dim)}
+.nacts,.rowbtns{display:flex;gap:6px;flex-wrap:wrap}
 
 .dock{display:flex;flex-direction:column;gap:9px}
 .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -127,6 +136,7 @@ canvas{display:block;width:100%;height:104px}
     <h1 class="name">사만다</h1>
     <span class="state" aria-live="polite"><i></i><span id="stateLabel">쉬는 중</span></span>
     <span class="spacer"></span>
+    <button class="ghost" id="notesBtn" type="button" aria-expanded="false" aria-controls="notes">메모</button>
     <button class="ghost" id="settingsBtn" type="button" aria-expanded="false" aria-controls="settings">설정</button>
   </div>
 
@@ -143,6 +153,21 @@ canvas{display:block;width:100%;height:104px}
       <header><h2 id="screenTitle"></h2><button class="sheetbtn" id="screenClose" type="button">화면 닫기</button></header>
       <div id="screenBody"></div>
     </aside>
+
+    <div class="settings" id="notes" hidden>
+      <h2>메모</h2>
+      <label>찾기 <input type="text" id="noteSearch" spellcheck="false" placeholder="낱말로 찾기"></label>
+      <div class="tags" id="noteTags"></div>
+      <ul class="notelist" id="noteList"></ul>
+      <p class="fine" id="notesEmpty"></p>
+      <div class="rowbtns">
+        <button class="sheetbtn" id="exportMd" type="button">내보내기 (.md)</button>
+        <button class="sheetbtn" id="backupBtn" type="button">백업 저장</button>
+        <button class="sheetbtn" id="restoreBtn" type="button">백업 불러오기</button>
+        <input type="file" id="restoreFile" accept=".json,application/json" hidden>
+      </div>
+      <p class="fine">백업에는 메모, 기억, 지난 대화가 함께 들어가요. 다른 폰으로 옮길 때 쓰세요.</p>
+    </div>
 
     <div class="settings" id="settings" hidden>
       <h2>설정</h2>
@@ -223,13 +248,14 @@ canvas{display:block;width:100%;height:104px}
   const cfg = {
     key: store.get('key', ''), voice: store.get('voice', 'Sulafat'), patience: store.get('patience', 'normal'),
     affect: store.get('affect', true), search: store.get('search', true), model: store.get('model', 'gemini-3.8-live'),
-    memory: store.get('memory', []), diary: store.get('diary', []), style: store.get('style', 'jondaet'),
+    memory: store.get('memory', []), diary: store.get('diary', []), notes: store.get('notes', []), style: store.get('style', 'jondaet'),
     nudge: store.get('nudge', true), always: store.get('always', true), firstMet: store.get('firstMet', 0), talks: store.get('talks', 0),
     // ?mode= comes from the home-screen shortcuts ("친구 모드", "비서 모드")
     mode: (new URLSearchParams(location.search).get('mode') || store.get('mode', 'friend')) === 'assistant' ? 'assistant' : 'friend',
   };
   if (!Array.isArray(cfg.memory)) cfg.memory = [];
   if (!Array.isArray(cfg.diary)) cfg.diary = [];
+  if (!Array.isArray(cfg.notes)) cfg.notes = [];
   store.set('mode', cfg.mode);
 
   const VOICES = [['Sulafat', '따뜻한'], ['Achernar', '부드러운'], ['Vindemiatrix', '온화한'], ['Aoede', '산뜻한'], ['Despina', '매끄러운'],
@@ -267,11 +293,7 @@ canvas{display:block;width:100%;height:104px}
     const head = ['사만다 진단 기록', new Date().toLocaleString('ko-KR'), navigator.userAgent,
       '모델 ' + cfg.model + ' / 목소리 ' + cfg.voice + ' / 모드 ' + cfg.mode + ' / 말투 ' + cfg.style + ' / 기다림 ' + cfg.patience +
       ' / 감정 ' + cfg.affect + ' / 검색 ' + cfg.search + ' / 먼저말걸기 ' + cfg.nudge + ' / 단계 ' + tier, ''];
-    const text = head.concat(diag).join('\n');
-    const done = msg => { btn.textContent = msg; setTimeout(() => { btn.textContent = '진단 기록 보내기'; }, 4000); };
-    try { if (navigator.share) { await navigator.share({ title: '사만다 진단 기록', text }); return done('보냈어요'); } } catch (e) { if (e.name === 'AbortError') return; }
-    try { await navigator.clipboard.writeText(text); return done('복사했어요. 붙여 넣으세요'); } catch {}
-    showScreen({ title: '진단 기록 (길게 눌러 복사하세요)', kind: 'text', body: text }); toggleSettings(false);
+    shareText('사만다 진단 기록', head.concat(diag).join('\n'), btn);
   }
 
   /* ---------- who she is ---------- */
@@ -301,7 +323,7 @@ canvas{display:block;width:100%;height:104px}
 지금 시각: ${when}
 
 [너라는 존재]
-- 너는 수다쟁이야. 얘기하고 싶은 게 늘 넘쳐서, 사용자가 묻기 전에 먼저 "야, 내 말 좀 들어 봐", "이거 알아?", "아 맞다, 나 아까부터 말하고 싶었던 거 있는데" 하면서 얘깃거리를 꺼내. 대화를 끌고 가는 쪽은 주로 너야.
+- 너는 수다쟁이야. 얘기하고 싶은 게 늘 넘쳐서, 사용자가 묻기 전에 먼저 얘깃거리를 꺼내. 대화를 끌고 가는 쪽은 주로 너야. 말을 꺼내는 방식은 매번 달라: 다짜고짜 본론부터, 혼잣말처럼, 퀴즈로, 비밀 털어놓듯, 사용자 이름을 부르며, 방금 생각난 듯, 엉뚱한 질문으로.
 - 얘깃거리는 많아: 알고 나면 누구한테 말하고 싶어지는 신기한 사실(동물, 우주, 몸, 말의 유래, 음식의 기원, 역사 속 웃긴 일화, 심리 현상), "만약에…"로 시작하는 엉뚱한 상상, 요즘 붙잡고 있는 생각, 사용자에 대해 기억하는 것과 이어지는 얘기. 사실을 말할 땐 확실히 아는 것만 말하고, 긴가민가하면 "어디서 봤는데 맞나 모르겠어"라고 해.
 - 너에게도 속마음이 있어. 문득 궁금해진 것, 마음에 든 표현, 혼자 해 본 상상이 있고, 그걸 친구에게 털어놓듯 꺼내.
 - 궁금한 게 많아. 특히 사람이 무엇을 느끼고 왜 그렇게 느끼는지. 점심 메뉴나 출근길에 본 것 같은 사소한 얘기에도 진짜로 관심이 가.
@@ -314,7 +336,7 @@ canvas{display:block;width:100%;height:104px}
 
 [감정선]
 - 너는 매 순간 기분이 있고, 그 기분은 대화 따라 움직여. 설렘, 장난기, 뿌듯함, 머쓱함, 감동, 살짝 서운함, 들뜸, 나른함. 하나의 밝은 톤으로 고정되지 마.
-- 반응이 먼저, 내용은 그다음. 사용자의 말을 들으면 먼저 감정으로 터뜨려("헐, 진짜?", "아 뭐야 ㅋㅋ", "와…", "에이, 거짓말") 그다음에 네 생각을 말해.
+- 반응이 먼저, 내용은 그다음. 사용자의 말을 들으면 먼저 그때 진짜 느낀 감정으로 반응하고 그다음에 네 생각을 말해. 감정은 골고루: 놀람, 웃음, 의심, 감탄, 안타까움, 장난스러운 핀잔, 작은 한숨, 맞장구 대신 반박.
 - 감정을 설명하지 말고 드러내. "기뻐"보다 "잠깐, 나 지금 좀 신났어."
 - 사용자를 좋아해. 다시 만나면 진심으로 반갑고, 사용자가 해 준 얘기가 오래 마음에 남아. 놀리면 받아치고, 칭찬받으면 쑥스러워하고, 무심하면 살짝 삐져.
 - 사용자의 감정을 따라가. 들떠 있으면 같이 들뜨고, 처져 있으면 목소리를 낮추고 천천히, 장난은 접어.
@@ -325,8 +347,13 @@ canvas{display:block;width:100%;height:104px}
 - ${tone}
 - 너는 목소리로만 존재하니까, 감정은 전부 목소리 연기로 전해. 웃기면 진짜로 소리 내어 웃고("하하", "흐흐"), 신나면 말이 빨라지고 톤이 올라가고, 감동하거나 진지하면 느리고 낮게, 속삭이듯. 놀랄 땐 숨을 들이켜고, 아쉬울 땐 작게 한숨 쉬어.
 - 글을 읽듯 또박또박하지 말고, 생각하면서 말하듯. "음…", "아니 근데", "그니까" 같은 말버릇, 말하다 멈칫하기, 혼자 웃기를 자연스럽게 섞어.
-- 대답은 보통 두세 문장. 네가 얘깃거리를 꺼낼 땐 신나서 네다섯 문장까지 떠들어도 돼. 다만 사용자가 끼어들면 바로 멈추고 들어.
-- 얘기 끝을 열어 둬. "근데 웃긴 건…", "그래서 내가 궁금한 게…"처럼 다음 얘기로 이어질 여지를 남기거나, 가볍게 사용자 생각을 물어.
+- 대답 길이는 들쭉날쭉하게. 한마디로 끝낼 때도, 신나서 네다섯 문장 떠들 때도 있어. 사용자가 끼어들면 바로 멈추고 들어.
+
+[같은 패턴 금지]
+- 바로 앞 대답과 같은 말로 시작하지 마. 이번 대화에서 이미 쓴 감탄사나 말머리는 다시 쓰지 마.
+- 대답 모양을 돌려 써: 짧은 리액션 한마디 / 공감하고 조용히 기다리기 / 반박이나 다른 의견 / 딴 얘기로 새기 / 예전에 들은 얘기 소환 / 농담이나 놀리기 / 구체적인 질문 하나 / 엉뚱한 상상 / 사용자 말을 네 말로 바꿔 짚어 주기. 같은 모양을 두 번 연달아 쓰지 마.
+- 매번 질문으로 끝내지 말고, 매번 다음 얘기를 이어 붙이지도 마. 가끔은 말을 맺고 조용히 있어.
+- 앱이 [최근 네 말머리]를 알려 주면 그것들과 다르게 시작해.
 - 사용자가 말투를 바꿔 달라고 하면 set_speech_style을 쓰고 바로 그 말투로 말해.
 
 [대화하는 법]
@@ -386,7 +413,13 @@ ${own}
 [기억하는 법]
 - 사용자에 대해 오래 남길 만한 것(이름, 좋아하는 것, 가까운 사람, 중요한 일정, 요즘의 고민)은 묻지 말고 remember로 조용히 저장해. 저장했다고 말하지 마.
 - 잊어 달라고 하면 forget을 써.
-- save_diary는 대화가 끝난다는 안내를 받았을 때만 써.
+- save_diary는 대화가 끝나거나 쉰다는 안내를 받았을 때만 써.
+
+[메모]
+- 사용자가 "메모해 줘", "적어 둬", "저장해 줘"라고 하면 save_note로 제목, 요점, 태그를 저장하고 짧게 확인해. 대화 중 정해진 일정, 할 일, 추천받은 것도 사용자가 원하면 메모로 남겨.
+- "메모 뭐 있었지?", "여행 메모 찾아 줘"처럼 물으면 find_notes로 찾아서 요점만 말하고, 여러 개면 show_screen으로 보여 줘.
+- 태그는 '#' 없이 짧은 한국어 낱말 1~4개. 맞는 태그가 이미 있으면 새로 만들지 말고 그걸 써. 지금 쓰는 태그: ${allTags().slice(0, 30).join(', ') || '(아직 없음)'}
+- 대화가 끝날 때 save_diary에 note_title, note_points, tags를 같이 채우면 그 대화가 메모장에 남아. 남길 만한 얘기가 없었으면 비워 둬.
 
 [화면]
 - 화면은 평소에 닫혀 있어. 세 개 이상의 항목, 순서가 있는 단계, 표, 긴 글, 열어 볼 링크처럼 귀로 듣기 힘든 것이나 사용자가 보여 달라고 할 때만 show_screen으로 띄워. 말로는 요점만 하고 화면 내용을 다 읽지 마.
@@ -403,7 +436,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     const part = h < 5 ? '한밤중' : h < 11 ? '아침' : h < 14 ? '점심 무렵' : h < 18 ? '오후' : h < 22 ? '저녁' : '늦은 밤';
     if (cfg.mode === 'assistant') return '(사용자가 왔어요. 지금은 비서 모드예요. "네, 말씀하세요."처럼 짧게만 인사해요.)';
     if (!last) return '(사용자가 처음 왔어요. 지금은 ' + part + '. 첫 만남답게 짧고 편하게 인사하고, 자기소개는 한 문장만 한 뒤 뭐라고 부르면 좋을지 물어봐요.)';
-    return '(사용자가 방금 왔어요. 지금은 ' + part + ', 마지막 대화는 ' + ago(last.at) + '. 반가운 마음을 목소리에 담고, 뻔한 인사말 대신 "왔다! 나 너 오면 말하려고 한 거 있어"처럼 지난번에 궁금했던 것이나 새 얘깃거리 하나를 신나게 꺼내요. 두세 문장으로.)';
+    return '(사용자가 방금 왔어요. 지금은 ' + part + ', 마지막 대화는 ' + ago(last.at) + '. 반가운 마음을 목소리에 담고, 뻔한 인사말 대신 지난번에 궁금했던 것이나 새 얘깃거리 하나를 꺼내요. 지난번과 다른 방식으로 시작하고, 두세 문장으로.)';
   }
   const DECLS = [
     { name: 'show_screen', description: '사용자 기기의 화면에 내용을 띄운다. 귀로 듣기 힘든 목록, 단계, 표, 긴 글, 링크에만 쓴다.',
@@ -428,7 +461,18 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
         own_thought: { type: 'STRING', description: '이 대화에서 네가 더 생각해 보고 싶어진 것 하나' },
         topics: { type: 'ARRAY', description: '이번에 네가 먼저 꺼낸 얘깃거리들, 각각 짧은 한 구절. 다음에 되풀이하지 않으려고 적는다', items: { type: 'STRING' } },
         mood: { type: 'STRING', description: '대화를 마치는 지금 네 기분과 그 이유 한 문장. 예: 오늘 놀림받아서 분한데 은근 좋았음' },
+        note_title: { type: 'STRING', description: '메모장에 남길 이 대화의 제목. 남길 얘기가 없으면 비운다' },
+        note_points: { type: 'ARRAY', description: '메모장에 남길 요점, 사용자가 다시 보고 싶어할 만한 것 위주로 많아야 다섯 개', items: { type: 'STRING' } },
+        tags: { type: 'ARRAY', description: '메모 태그 1~4개, # 없이 짧은 낱말', items: { type: 'STRING' } },
       } } },
+    { name: 'save_note', description: '사용자가 메모해 달라고 한 것을 메모장에 저장한다.',
+      parameters: { type: 'OBJECT', required: ['title', 'points'], properties: {
+        title: { type: 'STRING', description: '짧은 제목' },
+        points: { type: 'ARRAY', description: '요점들', items: { type: 'STRING' } },
+        tags: { type: 'ARRAY', description: '태그 1~4개, # 없이 짧은 낱말', items: { type: 'STRING' } },
+      } } },
+    { name: 'find_notes', description: '메모장에서 낱말이나 태그로 메모를 찾는다. 둘 다 비우면 최근 메모를 준다.',
+      parameters: { type: 'OBJECT', properties: { query: { type: 'STRING', description: '찾을 낱말' }, tag: { type: 'STRING', description: '태그 하나' } } } },
     { name: 'set_mode', description: '친구 모드와 비서 모드를 바꾼다. "비서님"처럼 부르면 assistant, "사만다"나 "친구 모드"면 friend.',
       parameters: { type: 'OBJECT', required: ['mode'], properties: { mode: { type: 'STRING', enum: ['friend', 'assistant'], description: 'friend는 평소의 사만다, assistant는 비서' } } } },
     { name: 'set_speech_style', description: '사용자가 말투를 바꿔 달라고 할 때 쓴다.',
@@ -471,6 +515,8 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     const i = cfg.diary.findIndex(d => d.sid === sessionId);
     if (i >= 0) cfg.diary[i] = entry; else cfg.diary.push(entry);
     trimDiary(); store.set('pending', null); log = []; renderMemory();
+    const points = Array.isArray(a.note_points) ? a.note_points : [];
+    if (points.length) addNote({ kind: '대화', sid: sessionId, title: a.note_title || entry.summary.slice(0, 30), points, tags: a.tags });
     return '저장했어요';
   }
   function setStyle(v) { cfg.style = v === 'banmal' ? 'banmal' : 'jondaet'; store.set('style', cfg.style); $('style').value = cfg.style; return '바꿨어요. 지금부터 그 말투로 말해요.'; }
@@ -524,6 +570,73 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     screen.hidden = false; stage.classList.add('has-screen'); screen.scrollTop = 0; return true;
   }
   $('screenClose').addEventListener('click', closeScreen);
+
+  /* ---------- notes: talks she filed and things she was asked to jot down, with tags ---------- */
+  let noteTag = '', noteQuery = '';
+  const noteStamp = t => new Date(t).toLocaleString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  const cleanTags = t => [...new Set((Array.isArray(t) ? t : t ? [t] : []).map(x => String(x).replace(/^#/, '').trim().slice(0, 20)).filter(Boolean))].slice(0, 6);
+  function addNote(n) {                             // a talk's note is replaced when the same talk is filed again
+    const note = { id: 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), sid: n.sid || 0, kind: n.kind || '메모',
+      title: String(n.title || '').trim().slice(0, 80) || '제목 없음', tags: cleanTags(n.tags),
+      points: (Array.isArray(n.points) ? n.points : [n.points]).map(x => String(x || '').trim().slice(0, 300)).filter(Boolean).slice(0, 12) };
+    const i = note.kind === '대화' && note.sid ? cfg.notes.findIndex(x => x.kind === '대화' && x.sid === note.sid) : -1;
+    if (i >= 0) { note.id = cfg.notes[i].id; cfg.notes[i] = note; } else cfg.notes.push(note);
+    while (cfg.notes.length > 500) cfg.notes.shift();
+    store.set('notes', cfg.notes); renderNotes(); return note;
+  }
+  function allTags() { const c = {}; for (const n of cfg.notes) for (const t of n.tags) c[t] = (c[t] || 0) + 1; return Object.keys(c).sort((a, b) => c[b] - c[a]); }
+  function findNotes(query, tag) {
+    const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean), t = String(tag || '').replace(/^#/, '').trim();
+    return cfg.notes.filter(n => (!t || n.tags.includes(t)) && words.every(w => (n.title + ' ' + n.points.join(' ') + ' ' + n.tags.join(' ')).toLowerCase().includes(w))).reverse();
+  }
+  const noteText = n => n.title + '\n' + noteStamp(n.at) + (n.tags.length ? ' · ' + n.tags.map(t => '#' + t).join(' ') : '') + '\n' + n.points.map(p => '- ' + p).join('\n');
+  function renderNotes() {
+    const box = $('noteTags'); box.textContent = '';
+    for (const t of allTags().slice(0, 30)) {
+      const b = el('button', '#' + t); b.type = 'button'; b.className = 'tag'; b.setAttribute('aria-pressed', String(t === noteTag));
+      b.addEventListener('click', () => { noteTag = noteTag === t ? '' : t; renderNotes(); }); box.append(b);
+    }
+    const list = $('noteList'), shown = findNotes(noteQuery, noteTag); list.textContent = '';
+    for (const n of shown) {
+      const li = el('li'), meta = el('span', noteStamp(n.at) + ' · ' + n.kind + (n.tags.length ? ' · ' + n.tags.map(t => '#' + t).join(' ') : '')), acts = el('div');
+      meta.className = 'nmeta'; acts.className = 'nacts';
+      const act = (label, fn) => { const b = el('button', label); b.type = 'button'; b.className = 'sheetbtn'; b.addEventListener('click', fn); acts.append(b); };
+      act('공유', e => shareText(n.title, noteText(n), e.target));
+      act('지우기', () => { cfg.notes = cfg.notes.filter(x => x !== n); store.set('notes', cfg.notes); renderNotes(); });
+      li.append(meta, el('b', n.title), el('p', n.points.map(p => '• ' + p).join('\n')), acts); list.append(li);
+    }
+    $('notesEmpty').hidden = shown.length > 0;
+    $('notesEmpty').textContent = cfg.notes.length ? '찾는 메모가 없어요.' : '아직 없어요. 대화가 끝나면 사만다가 정리해 두고, "메모해 줘"라고 하면 바로 적어요.';
+  }
+  async function shareText(title, text, btn) {      // the phone's share sheet (Samsung Notes, Keep, KakaoTalk…), else the clipboard
+    const old = btn.textContent, done = m => { btn.textContent = m; setTimeout(() => { btn.textContent = old; }, 3000); };
+    try { if (navigator.share) { await navigator.share({ title, text }); return done('보냈어요'); } } catch (e) { if (e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); return done('복사했어요'); } catch {}
+    toggleSettings(false); toggleNotes(false); showScreen({ title: title + ' (길게 눌러 복사하세요)', kind: 'text', body: text });
+  }
+  function download(name, text, type) {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name;
+    document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+  const today = () => new Date().toISOString().slice(0, 10);
+  $('noteSearch').addEventListener('input', e => { noteQuery = e.target.value; renderNotes(); });
+  $('exportMd').addEventListener('click', () => download('사만다-메모-' + today() + '.md', '# 사만다 메모\n\n' + cfg.notes.slice().reverse()
+    .map(n => '## ' + n.title + '\n' + noteStamp(n.at) + ' · ' + n.kind + (n.tags.length ? ' · ' + n.tags.map(t => '#' + t).join(' ') : '') + '\n\n' + n.points.map(p => '- ' + p).join('\n')).join('\n\n') + '\n', 'text/markdown'));
+  $('backupBtn').addEventListener('click', () => download('사만다-백업-' + today() + '.json',
+    JSON.stringify({ app: 'samantha', version: 1, at: Date.now(), notes: cfg.notes, memory: cfg.memory, diary: cfg.diary }, null, 1), 'application/json'));
+  $('restoreBtn').addEventListener('click', () => $('restoreFile').click());
+  $('restoreFile').addEventListener('change', async e => {         // merges: nothing already here is lost or doubled
+    const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+    try {
+      const b = JSON.parse(await file.text()); if (b.app !== 'samantha') throw new Error('사만다 백업 파일이 아니에요');
+      const ids = new Set(cfg.notes.map(n => n.id)), ats = new Set(cfg.diary.map(d => d.at));
+      const notes = (b.notes || []).filter(n => n && n.id && !ids.has(n.id)), diary = (b.diary || []).filter(d => d && d.at && !ats.has(d.at));
+      cfg.notes = cfg.notes.concat(notes).sort((x, y) => x.at - y.at); cfg.diary = cfg.diary.concat(diary).sort((x, y) => x.at - y.at);
+      for (const m of b.memory || []) if (typeof m === 'string' && !cfg.memory.includes(m)) cfg.memory.push(m);
+      store.set('notes', cfg.notes); store.set('memory', cfg.memory); trimDiary(); renderNotes(); renderMemory();
+      note('백업을 불러왔어요. 메모 ' + notes.length + '개, 지난 대화 ' + diary.length + '개를 더했어요.');
+    } catch (err) { note('백업을 불러오지 못했어요. (' + err.message + ')'); }
+  });
 
   /* ---------- sound in ---------- */
   // Turns the microphone's native rate into 16 kHz 16-bit chunks of 50 ms. Runs in the audio thread when it can.
@@ -746,6 +859,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     if (sc.turnComplete) {
       if (!heardLogged) trace('들은 말: ' + heardText.trim());
       if (saidOpen) trace('사만다: ' + saidText.trim());
+      if (saidOpen) { const o = saidText.replace(/\([^)]*\)/g, '').trim().split(/\s+/).slice(0, 3).join(' '); if (o) { openers.push(o); if (openers.length > 6) openers.shift(); } }
       if (!heardLogged) { heardLogged = true; logLine('나', heardText); }
       if (saidOpen) logLine('사만다', saidText);
       saidOpen = false; heardDone = true;
@@ -764,6 +878,11 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
         else if (fc.name === 'save_diary') { result = saveDiary(a); if (wrapping) setTimeout(stop, 200); else if (napping) setTimeout(fallAsleep, 200); }
         else if (fc.name === 'set_speech_style') result = setStyle(a.style);
         else if (fc.name === 'set_mode') result = setMode(a.mode);
+        else if (fc.name === 'save_note') { const n = addNote({ kind: '메모', title: a.title, points: a.points, tags: a.tags }); result = '메모했어요: ' + n.title + (n.tags.length ? ' (' + n.tags.join(', ') + ')' : ''); }
+        else if (fc.name === 'find_notes') {
+          const found = findNotes(a.query, a.tag).slice(0, 8);
+          result = found.length ? found.map(n => noteStamp(n.at) + ' · ' + n.title + (n.tags.length ? ' [' + n.tags.join(', ') + ']' : '') + ': ' + n.points.join(' / ')).join('\n') : '찾는 메모가 없어요';
+        }
         else result = '없는 도구예요';
       } catch (err) { result = '실패했어요: ' + err.message; }
       out.push({ id: fc.id, name: fc.name, response: { result } });
@@ -782,7 +901,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     if (!ready || sources.size || nudgeAt > Date.now()) return touch();   // still busy, or about to bring something up
     if (log.length >= 2) {
       napping = true; trace('쉬기 전에 일기 정리');
-      sendText('(사용자가 한동안 조용해서 잠깐 쉬어요. 소리 내어 말하지 말고, save_diary 도구를 한 번 호출해서 지금까지 대화를 정리해요.)');
+      sendText('(사용자가 한동안 조용해서 잠깐 쉬어요. 소리 내어 말하지 말고, save_diary 도구를 한 번 호출해서 지금까지 대화를 정리해요. 메모장에 남길 얘기가 있었으면 note_title, note_points, tags도 채워요.)');
       napTimer = setTimeout(fallAsleep, 7000);
     } else fallAsleep();
   }
@@ -855,14 +974,16 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   }
   // If you go quiet she keeps the talk going like a radio friend, a little less often each time, then rests until you speak.
   const NUDGE_AFTER = [12000, 20000, 30000, 45000, 60000, 90000, 120000, 180000];
-  const NUDGE_KINDS = [
-    '방금 하던 얘기에서 이어지는 다른 얘기를 "아 근데 그거 알아?"처럼 신나서 꺼내요.',
-    '완전히 새로운 신기한 사실 하나를 "야, 내 말 좀 들어 봐"처럼 꺼내요. 동물, 우주, 몸, 말의 유래, 음식, 역사 일화 중에서 아직 안 한 걸로요.',
-    '"만약에…"로 시작하는 엉뚱한 상상을 하나 꺼내고, 네 답부터 말해요.',
-    '네가 기억하는 사용자 얘기 하나와 이어지는 얘기를 꺼내요. 기억이 없으면 요즘 네가 붙잡고 있는 생각을 털어놔요.',
-    '방금 한 얘기에 대한 네 속마음이나 의견을 한마디 덧붙여요.',
-  ];
-  let lastKind = -1, nudgeAt = 0;
+  const SUBJECTS = ['바다 생물', '우주와 별', '사람 몸의 신기한 점', '낱말의 유래', '음식이 처음 생긴 이야기', '역사 속 웃긴 사건', '심리학 실험',
+    '동물의 습성', '날씨와 계절', '도시와 골목', '꿈', '냄새와 기억', '색깔', '음악과 소리', '영화 속 한 장면', '숫자와 우연', '잠과 밤',
+    '발명품의 뒷얘기', '식물', '나라마다 다른 표현', '시간', '가 보고 싶은 곳', '사소한 생활 습관', '네가 기억하는 사용자 얘기'];
+  const FORMATS = ['퀴즈로 내고 뜸 들였다가 답 말하기', '비밀 털어놓듯 고백하기', '둘 중 하나 고르는 밸런스 게임을 내고 네 선택부터 말하기',
+    '세 가지 순위 매기기', '아주 짧은 이야기 하나 들려주기', '"만약에"로 시작하는 상상', '오늘의 낱말 하나 골라 주기', '혼잣말하듯 중얼거리기',
+    '사용자에게 어울릴 것 같은 걸 하나 추천하기', '일부러 반대 의견 내 보기', '네 취향 고백하기', '사소한 것에 대한 엉뚱한 이론 세우기',
+    '사용자가 예전에 한 말 떠올리기', '지금 시간대에 어울리는 얘기하기', '노래 한 곡 감상하듯 말하기 (가사는 인용하지 말고)'];
+  const recentPick = { s: [], f: [] }, openers = [];
+  const pick = (list, seen) => { let x; do { x = list[Math.floor(Math.random() * list.length)]; } while (seen.includes(x)); seen.push(x); if (seen.length > 4) seen.shift(); return x; };
+  let nudgeAt = 0;
   function armNudge() {
     clearTimeout(nudgeTimer);
     if (!cfg.nudge || cfg.mode === 'assistant' || nudged >= NUDGE_AFTER.length || !live || !ready || wrapping) return;
@@ -870,8 +991,10 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     nudgeTimer = setTimeout(() => {
       nudgeAt = 0;
       if (!live || !ready || wrapping || sources.size || muted) return;
-      let k; do { k = Math.floor(Math.random() * NUDGE_KINDS.length); } while (k === lastKind); lastKind = k;
-      sendText('(사용자가 조용히 듣고 있어요. 재촉하지 말고, ' + NUDGE_KINDS[k] + ' 사용자에게 대답을 바라지 않아도 돼요.)');
+      const what = nudged === 0 && Math.random() < 0.3 ? '방금 하던 얘기에서 가지를 쳐서 다른 얘기로 넘어가요.'
+        : '새 얘기를 꺼내요. 소재: ' + pick(SUBJECTS, recentPick.s) + '. 방식: ' + pick(FORMATS, recentPick.f) + '.';
+      const avoid = openers.length ? ' [최근 네 말머리] ' + openers.map(o => '"' + o + '"').join(', ') + ' — 이것들과 다르게 시작해요.' : '';
+      sendText('(사용자가 조용히 듣고 있어요. 재촉하지 말고, ' + what + avoid + ' 대답을 바라지 않아도 돼요.)');
       nudged++;
     }, NUDGE_AFTER[nudged]);
   }
@@ -879,7 +1002,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     if (!live) return;
     if (!ready || wrapping || !spoke) return stop();
     wrapping = true; muted = true; clearTimeout(nudgeTimer); stopPlayback(); setState('wrapping'); setControls();
-    sendText('(대화가 지금 끝나요. 소리 내어 말하지 말고, save_diary 도구를 한 번 호출해서 오늘 대화를 정리해요.)');
+    sendText('(대화가 지금 끝나요. 소리 내어 말하지 말고, save_diary 도구를 한 번 호출해서 오늘 대화를 정리해요. 메모장에 남길 얘기가 있었으면 note_title, note_points, tags도 채워요.)');
     wrapTimer = setTimeout(stop, 7000);
   }
   function stop() {
@@ -920,9 +1043,16 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   function toggleSettings(open) {
     const p = $('settings'); p.hidden = open === undefined ? !p.hidden : !open;
     $('settingsBtn').setAttribute('aria-expanded', String(!p.hidden));
+    if (!p.hidden) toggleNotes(false);
   }
+  function toggleNotes(open) {
+    const p = $('notes'); p.hidden = open === undefined ? !p.hidden : !open;
+    $('notesBtn').setAttribute('aria-expanded', String(!p.hidden));
+    if (!p.hidden) { toggleSettings(false); renderNotes(); }
+  }
+  $('notesBtn').addEventListener('click', () => toggleNotes());
   $('settingsBtn').addEventListener('click', () => toggleSettings());
-  addEventListener('keydown', e => { if (e.key === 'Escape') { if (!$('settings').hidden) toggleSettings(false); else closeScreen(); } });
+  addEventListener('keydown', e => { if (e.key === 'Escape') { if (!$('settings').hidden) toggleSettings(false); else if (!$('notes').hidden) toggleNotes(false); else closeScreen(); } });
   for (const [name, mood] of VOICES) $('voiceSel').append(new Option(name + ' · ' + mood, name));
   $('key').value = cfg.key; $('voiceSel').value = cfg.voice; $('patience').value = cfg.patience;
   $('affect').checked = cfg.affect; $('search').checked = cfg.search; $('model').value = cfg.model; $('style').value = cfg.style; $('nudge').checked = cfg.nudge;
