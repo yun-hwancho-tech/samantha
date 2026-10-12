@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>사만다</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#B93A27" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1C0D0B" media="(prefers-color-scheme: dark)">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap">
 <style>
 /* One screen. A single voice line runs across the middle and her words sit under it.
@@ -219,10 +224,12 @@ canvas{display:block;width:100%;height:104px}
     affect: store.get('affect', true), search: store.get('search', true), model: store.get('model', 'gemini-3.8-live'),
     memory: store.get('memory', []), diary: store.get('diary', []), style: store.get('style', 'jondaet'),
     nudge: store.get('nudge', true), firstMet: store.get('firstMet', 0), talks: store.get('talks', 0),
-    mode: store.get('mode', 'friend') === 'assistant' ? 'assistant' : 'friend',
+    // ?mode= comes from the home-screen shortcuts ("친구 모드", "비서 모드")
+    mode: (new URLSearchParams(location.search).get('mode') || store.get('mode', 'friend')) === 'assistant' ? 'assistant' : 'friend',
   };
   if (!Array.isArray(cfg.memory)) cfg.memory = [];
   if (!Array.isArray(cfg.diary)) cfg.diary = [];
+  store.set('mode', cfg.mode);
 
   const VOICES = [['Sulafat', '따뜻한'], ['Achernar', '부드러운'], ['Vindemiatrix', '온화한'], ['Aoede', '산뜻한'], ['Despina', '매끄러운'],
     ['Callirrhoe', '느긋한'], ['Enceladus', '숨소리 섞인'], ['Gacrux', '성숙한'], ['Algieba', '매끄러운'], ['Umbriel', '느긋한'],
@@ -888,6 +895,8 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   if (!reduced) { const loop = () => { drawWave(); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
   else setInterval(drawWave, 250);
   setControls();
+  // installable as a home-screen app (only over https; the local dev server skips it)
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
 </script>
 </body>
