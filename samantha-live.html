@@ -545,15 +545,23 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   function b64(buf) { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); }
   // While the line is closed (she dozes, or it is being replaced) the sound is kept and sent once she is back,
   // so the first words after waking her are not lost.
-  const preroll = []; let loud = 0;
+  const preroll = []; let hot = [], floor = 0.003, peak = 0, peakAt = 0, lastMicAt = 0;
   const audioMsg = pcm => ({ realtimeInput: { audio: { data: b64(pcm), mimeType: 'audio/pcm;rate=16000' } } });
   function onMic(pcm, rms) {
+    lastMicAt = Date.now();
     micLevel = muted ? 0 : rms; if (!muted) meterMic(rms, sources.size > 0);
     if (!muted && rms > 0.02 && !sources.size) { lastVoiceAt = now(); awaiting = true; spoke = true; nudged = 0; clearTimeout(nudgeTimer); }
     if (muted || !live) return;
     if (ready) return send(audioMsg(pcm));
     preroll.push(pcm); if (preroll.length > (dozing ? 30 : 200)) preroll.shift();   // 1.5 s while dozing, 10 s while waking
-    if (dozing) { loud = rms > 0.025 ? loud + 1 : 0; if (loud >= 3) wakeUp(); }
+    if (dozing) {
+      floor += (rms - floor) * (rms < floor ? 0.05 : 0.002);             // follows the room quickly down, slowly up
+      const gate = Math.max(0.006, floor * 4);
+      hot.push(rms > gate); if (hot.length > 4) hot.shift();
+      if (hot.filter(Boolean).length >= 2) return wakeUp();             // 0.1 s of voice within 0.2 s
+      peak = Math.max(peak, rms);
+      if (Date.now() - peakAt > 30000) { if (peak > gate * 0.4) trace('쉬는 중 소리: 바닥 ' + floor.toFixed(4) + ' 기준 ' + gate.toFixed(4) + ' 최대 ' + peak.toFixed(4)); peak = 0; peakAt = Date.now(); }
+    }
   }
   async function startAudio() {
     if (!ac) {                                        // her voice first, so she can still speak when the microphone is refused
@@ -563,6 +571,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     }
     await ac.resume();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Object.assign(new Error('insecure'), { name: 'InsecureContext' });
+    lastMicAt = Date.now();                           // the watchdog gives a starting microphone time
     micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
     // The microphone gets its own 16 kHz context so the browser's resampler does the work; plain averaging blurs consonants.
     let mac = ac;
@@ -575,7 +584,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     try {
       const code = Decimator.toString() + ";class Cap extends AudioWorkletProcessor{constructor(){super();this.d=new Decimator(sampleRate,(pcm,rms)=>this.port.postMessage({pcm,rms},[pcm]))}process(i){const c=i[0]&&i[0][0];if(c)this.d.push(c);return true}}registerProcessor('cap',Cap)";
       const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-      try { await mac.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      try { if (!mac.capReady) await mac.audioWorklet.addModule(url); mac.capReady = true; } finally { URL.revokeObjectURL(url); }
       micNode = new AudioWorkletNode(mac, 'cap');
       micNode.port.onmessage = e => onMic(e.data.pcm, e.data.rms);
     } catch {
@@ -782,14 +791,27 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     if (!live || dozing || wrapping) return;
     dozing = true; ready = false; clearTimeout(nudgeTimer); nudgeAt = 0;
     if (ws) { const s = ws; ws = null; try { s.close(); } catch {} }
-    stopPlayback(); preroll.length = 0; loud = 0; sessionId = Date.now();
-    setState('dozing'); setControls(); trace('쉬는 중: 말하면 깨어나요');
+    stopPlayback(); preroll.length = 0; hot = []; peak = 0; peakAt = Date.now(); sessionId = Date.now();
+    setState('dozing'); setControls(); meter.textContent = '말을 걸거나 화면을 누르면 깨어나요'; trace('쉬는 중: 말하면 깨어나요');
   }
   function wakeUp() {
     if (!dozing) return;
-    dozing = false; loud = 0; trace('깨어남'); clearTimeout(retryTimer); retries = 0; connect();
+    dozing = false; hot = []; meter.textContent = ''; trace('깨어남'); clearTimeout(retryTimer); retries = 0; connect();
     touch(FALSE_WAKE_MS);                           // a cough that woke her sends her back to rest soon; real talk extends it
   }
+  stage.addEventListener('click', e => { if (dozing && !e.target.closest('.settings, .screen, a, button')) wakeUp(); });
+  let micStale = 0;
+  setInterval(async () => {
+    if (!live || !micStream || muted) { micStale = 0; return; }
+    if (Date.now() - lastMicAt < 2000) { micStale = 0; return; }
+    micStale++;
+    trace('마이크 소리가 멈춤 (' + micStale + '번째, 소리 처리 상태 ' + (micAc ? micAc.state : '-') + '/' + (ac ? ac.state : '-') + ')');
+    try { if (micAc) await micAc.resume(); if (ac) await ac.resume(); } catch {}
+    if (micStale >= 2) {                            // resuming was not enough: start the microphone over
+      micStale = 0; stopAudio();
+      try { await startAudio(); trace('마이크 다시 켬'); } catch (err) { trace('마이크 다시 켜기 실패: ' + err.name); }
+    }
+  }, 2000);
   addEventListener('online', () => { if (live && !ws && !dozing) { clearTimeout(retryTimer); retries = 0; connect(); } });
   document.addEventListener('visibilitychange', async () => {     // back from another app or a dark screen
     if (document.hidden || !live) return;
@@ -947,7 +969,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
       analyser.getByteTimeDomainData(tbuf); let s = 0;
       for (let i = 0; i < tbuf.length; i++) { const v = (tbuf[i] - 128) / 128; s += v * v; }
       target = Math.min(1, Math.sqrt(s / tbuf.length) * 4.5);
-    } else if (state === 'listening') target = Math.min(1, micLevel * 7);
+    } else if (state === 'listening' || state === 'dozing') target = Math.min(1, micLevel * 7);
     level += (target - level) * (target > level ? 0.5 : 0.12);
     const rest = state === 'off' ? 0.03 : state === 'connecting' ? 0.1 : 0.06;
     const amp = (rest + level * 0.85) * H * 0.46;
