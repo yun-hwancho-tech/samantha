@@ -181,6 +181,11 @@ canvas{display:block;width:100%;height:104px}
         <p id="diaryEmpty">아직 없어요. 대화를 끝낼 때마다 사만다가 그날 얘기를 정리해 둬요.</p>
       </div>
       <button class="sheetbtn" id="wipeBtn" type="button" style="align-self:flex-start">기억 전부 지우기</button>
+      <div class="mem">
+        <h3>문제가 있을 때</h3>
+        <p>연결, 듣기, 끼어들기 기록을 보내요. 키와 목소리는 빠지고, 주고받은 말은 들어가요.</p>
+      </div>
+      <button class="sheetbtn" id="diagBtn" type="button" style="align-self:flex-start">진단 기록 보내기</button>
     </div>
   </div>
 
@@ -230,7 +235,36 @@ canvas{display:block;width:100%;height:104px}
   const LABEL = { off: '쉬는 중', connecting: '연결 중', listening: '듣는 중', speaking: '말하는 중', wrapping: '오늘 대화 정리 중' };
   let state = 'off';
   function setState(s) { state = s; document.body.dataset.state = s; $('stateLabel').textContent = LABEL[s] + (cfg.mode === 'assistant' ? ' · 비서 모드' : ''); if (reduced) drawWave(); }
-  function note(msg) { notice.textContent = msg; notice.hidden = !msg; }
+  function note(msg) { notice.textContent = msg; notice.hidden = !msg; if (msg) trace('안내: ' + msg); }
+
+  /* ---------- diagnostics: what happened on the line, without the key or any sound, to send when something goes wrong ---------- */
+  const diag = store.get('diag', []).slice(-400);
+  function trace(s) {
+    diag.push(new Date().toLocaleTimeString('ko-KR', { hour12: false }) + ' ' + String(s).slice(0, 300));
+    if (diag.length > 400) diag.splice(0, diag.length - 400);
+    clearTimeout(trace.t); trace.t = setTimeout(() => store.set('diag', diag), 1000);
+  }
+  addEventListener('error', e => trace('오류: ' + e.message));
+  addEventListener('unhandledrejection', e => trace('오류: ' + (e.reason && e.reason.message || e.reason)));
+  let lvl = { n: 0, sum: 0, max: 0, herMax: 0, at: 0 };          // microphone loudness, separately while she talks
+  function meterMic(rms, herTurn) {
+    if (herTurn) lvl.herMax = Math.max(lvl.herMax, rms); else { lvl.n++; lvl.sum += rms; lvl.max = Math.max(lvl.max, rms); }
+    const t = Date.now(); if (!lvl.at) lvl.at = t;
+    if (t - lvl.at > 15000) {
+      trace('마이크 크기 평균 ' + (lvl.n ? lvl.sum / lvl.n : 0).toFixed(3) + ' 최대 ' + lvl.max.toFixed(3) + ' / 사만다 말하는 중 최대 ' + lvl.herMax.toFixed(3));
+      lvl = { n: 0, sum: 0, max: 0, herMax: 0, at: t };
+    }
+  }
+  async function sendDiag(btn) {
+    const head = ['사만다 진단 기록', new Date().toLocaleString('ko-KR'), navigator.userAgent,
+      '모델 ' + cfg.model + ' / 목소리 ' + cfg.voice + ' / 모드 ' + cfg.mode + ' / 말투 ' + cfg.style + ' / 기다림 ' + cfg.patience +
+      ' / 감정 ' + cfg.affect + ' / 검색 ' + cfg.search + ' / 먼저말걸기 ' + cfg.nudge + ' / 단계 ' + tier, ''];
+    const text = head.concat(diag).join('\n');
+    const done = msg => { btn.textContent = msg; setTimeout(() => { btn.textContent = '진단 기록 보내기'; }, 4000); };
+    try { if (navigator.share) { await navigator.share({ title: '사만다 진단 기록', text }); return done('보냈어요'); } } catch (e) { if (e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(text); return done('복사했어요. 붙여 넣으세요'); } catch {}
+    showScreen({ title: '진단 기록 (길게 눌러 복사하세요)', kind: 'text', body: text }); toggleSettings(false);
+  }
 
   /* ---------- who she is ---------- */
   const ago = t => {
@@ -487,11 +521,11 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
       }
     }
   }
-  let ac = null, playGain = null, analyser = null, micStream = null, micSrc = null, micNode = null, micSink = null;
+  let micAc = null, ac = null, playGain = null, analyser = null, micStream = null, micSrc = null, micNode = null, micSink = null;
   let muted = false, micLevel = 0, lastVoiceAt = 0, awaiting = false;
   function b64(buf) { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); }
   function onMic(pcm, rms) {
-    micLevel = muted ? 0 : rms;
+    micLevel = muted ? 0 : rms; if (!muted) meterMic(rms, sources.size > 0);
     if (!muted && rms > 0.02 && !sources.size) { lastVoiceAt = now(); awaiting = true; spoke = true; nudged = 0; clearTimeout(nudgeTimer); }
     if (ready && !muted) send({ realtimeInput: { audio: { data: b64(pcm), mimeType: 'audio/pcm;rate=16000' } } });
   }
@@ -504,20 +538,29 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     await ac.resume();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw Object.assign(new Error('insecure'), { name: 'InsecureContext' });
     micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-    micSrc = ac.createMediaStreamSource(micStream);
-    micSink = ac.createGain(); micSink.gain.value = 0; micSink.connect(ac.destination);
+    // The microphone gets its own 16 kHz context so the browser's resampler does the work; plain averaging blurs consonants.
+    let mac = ac;
+    try {
+      if (!micAc) micAc = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      await micAc.resume(); micSrc = micAc.createMediaStreamSource(micStream); mac = micAc;
+    } catch { micSrc = ac.createMediaStreamSource(micStream); }
+    micSink = mac.createGain(); micSink.gain.value = 0; micSink.connect(mac.destination);
+    let how = 'worklet';
     try {
       const code = Decimator.toString() + ";class Cap extends AudioWorkletProcessor{constructor(){super();this.d=new Decimator(sampleRate,(pcm,rms)=>this.port.postMessage({pcm,rms},[pcm]))}process(i){const c=i[0]&&i[0][0];if(c)this.d.push(c);return true}}registerProcessor('cap',Cap)";
       const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-      try { await ac.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
-      micNode = new AudioWorkletNode(ac, 'cap');
+      try { await mac.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
+      micNode = new AudioWorkletNode(mac, 'cap');
       micNode.port.onmessage = e => onMic(e.data.pcm, e.data.rms);
     } catch {
-      const d = new Decimator(ac.sampleRate, onMic);            // older browsers
-      micNode = ac.createScriptProcessor(4096, 1, 1);
+      how = 'script';
+      const d = new Decimator(mac.sampleRate, onMic);            // older browsers
+      micNode = mac.createScriptProcessor(4096, 1, 1);
       micNode.onaudioprocess = e => d.push(e.inputBuffer.getChannelData(0));
     }
     micSrc.connect(micNode); micNode.connect(micSink);
+    const t = micStream.getAudioTracks()[0], s = t && t.getSettings ? t.getSettings() : {};
+    trace('마이크 켬: ' + (t ? t.label : '?') + ' / 처리 ' + mac.sampleRate + 'Hz ' + how + ' / 재생 ' + ac.sampleRate + 'Hz / 에코제거 ' + s.echoCancellation + ' 잡음제거 ' + s.noiseSuppression + ' 자동음량 ' + s.autoGainControl);
   }
   function stopAudio() {
     try { micStream && micStream.getTracks().forEach(t => t.stop()); } catch {}
@@ -560,16 +603,14 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
       sessionResumption: handle ? { handle } : {} };
     if (uses('search')) tools.push({ googleSearch: {} });
     if (uses('affect')) gen.enableAffectiveDialog = true;
-    if (uses('turns')) {                   // a cough or a chair creak should not count as her being spoken to
-      const ms = { short: 500, long: 1100 }[cfg.patience];
-      setup.realtimeInputConfig = { automaticActivityDetection: Object.assign({ startOfSpeechSensitivity: 'START_SENSITIVITY_LOW' }, ms ? { silenceDurationMs: ms } : {}) };
-    }
+    // Start-of-speech sensitivity stays at the server default: lowering it made cutting in on her fail on phones.
+    if (uses('turns')) setup.realtimeInputConfig = { automaticActivityDetection: { silenceDurationMs: { short: 500, long: 1100 }[cfg.patience] } };
     return { setup };
   }
   // Extras the server may refuse, in the order they are given up. tier = how many from the front are dropped.
   // What worked is remembered for a day, or until a setting changes.
-  const EXTRAS = [['search', '구글 검색'], ['affect', '감정 맞춤'], ['turns', '말 끝 감지 설정']];
-  const wanted = k => k === 'search' ? cfg.search : k === 'affect' ? cfg.affect : true;
+  const EXTRAS = [['search', '구글 검색'], ['affect', '감정 맞춤'], ['turns', '기다리는 시간']];
+  const wanted = k => k === 'search' ? cfg.search : k === 'affect' ? cfg.affect : cfg.patience !== 'normal';
   const uses = k => wanted(k) && EXTRAS.findIndex(x => x[0] === k) >= tier;
   const learned = store.get('fallback', null);
   let tier = learned && learned.model === cfg.model && Date.now() - learned.at < 864e5 ? learned.tier : 0;
@@ -582,9 +623,10 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   }
   const droppedNote = () => dropped.length ? dropped.join(', ') + ' 끄고 연결했어요.' : '';
   function resetTier() { tier = 0; dropped = []; store.set('fallback', null); }
-  function sendText(t) { lastSent = t; send({ realtimeInput: { text: t } }); }
+  function sendText(t) { lastSent = t; trace('글 보냄: ' + t); send({ realtimeInput: { text: t } }); }
   function connect() {
     gotSetup = false; ready = false; answered = false; usedHandle = !!handle; setState('connecting');
+    trace('연결 시도: ' + cfg.model + ' / 켠 옵션 ' + (EXTRAS.filter(x => uses(x[0])).map(x => x[1]).join(', ') || '없음') + (handle ? ' / 이어 붙이기' : ''));
     let sock;
     try { sock = new WebSocket(WS_URL + '?key=' + encodeURIComponent(cfg.key)); } catch (e) { return fail('연결을 시작하지 못했어요. ' + e.message); }
     ws = sock; sock.binaryType = 'arraybuffer';
@@ -599,6 +641,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   }
   function onClosed(e) {
     clearInterval(swapTimer);
+    trace('끊김: 코드 ' + e.code + ' ' + (e.reason || '') + (gotSetup ? '' : ' (연결 전)') + (answered ? '' : ' (대답 전)'));
     if (!live) return;
     stopPlayback();
     if (!gotSetup && usedHandle) { handle = null; return connect(); }          // the saved session expired
@@ -621,7 +664,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
 
   function onServer(m) {
     if (m.setupComplete) {
-      gotSetup = true; ready = true; setState('listening'); setControls();
+      gotSetup = true; ready = true; setState('listening'); setControls(); trace('연결됨');
       note([micMsg, droppedNote()].filter(Boolean).join(' '));
       if (micMsg) $('say').focus();
       if (!greeted) { greeted = true; cfg.talks++; store.set('talks', cfg.talks); if (!queued) sendText(kickoff()); }
@@ -639,9 +682,10 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
       clearInterval(swapTimer); const started = now();
       swapTimer = setInterval(() => { if (!sources.size || now() - started > 6000) { clearInterval(swapTimer); if (ws) ws.close(); } }, 400);
     }
-    if (m.toolCall && Array.isArray(m.toolCall.functionCalls)) runTools(m.toolCall.functionCalls);
+    if (m.voiceActivity && m.voiceActivity.type) trace(m.voiceActivity.type === 'ACTIVITY_START' ? '말소리 시작 감지' + (sources.size ? ' (사만다 말하는 중)' : '') : '말소리 끝 감지');
+    if (m.toolCall && Array.isArray(m.toolCall.functionCalls)) { trace('도구: ' + m.toolCall.functionCalls.map(c => c.name + ' ' + JSON.stringify(c.args || {})).join(' | ')); runTools(m.toolCall.functionCalls); }
     const sc = m.serverContent; if (!sc) return;
-    if (sc.interrupted) { stopPlayback(); if (saidOpen) logLine('사만다', saidText); saidOpen = false; }
+    if (sc.interrupted) { trace('끼어들기: 서버가 사만다 말을 멈춤'); stopPlayback(); if (saidOpen) logLine('사만다', saidText); saidOpen = false; }
     if (sc.inputTranscription && sc.inputTranscription.text) {
       if (heardDone) { heardText = ''; heardDone = false; heardLogged = false; }
       heardText += sc.inputTranscription.text; heard.textContent = heardText.trim();
@@ -652,6 +696,8 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     }
     if (sc.modelTurn && Array.isArray(sc.modelTurn.parts)) for (const p of sc.modelTurn.parts) if (p.inlineData && p.inlineData.data) playChunk(p.inlineData.data);
     if (sc.turnComplete) {
+      if (!heardLogged) trace('들은 말: ' + heardText.trim());
+      if (saidOpen) trace('사만다: ' + saidText.trim());
       if (!heardLogged) { heardLogged = true; logLine('나', heardText); }
       if (saidOpen) logLine('사만다', saidText);
       saidOpen = false; heardDone = true;
@@ -686,7 +732,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   }
   async function start() {
     if (!cfg.key) { toggleSettings(true); $('key').focus(); note('먼저 설정에 Gemini API 키를 넣어 주세요.'); return; }
-    note(''); micMsg = ''; live = true; retries = 0; handle = null; greeted = false; muted = false; wrapping = false;
+    trace('— 대화 시작 —'); note(''); micMsg = ''; live = true; retries = 0; handle = null; greeted = false; muted = false; wrapping = false;
     sessionId = Date.now(); log = []; spoke = false; nudged = 0; adoptPending(); renderMemory();
     if (!cfg.firstMet) { cfg.firstMet = Date.now(); store.set('firstMet', cfg.firstMet); }
     setControls(); setState('connecting');
@@ -725,6 +771,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     wrapTimer = setTimeout(stop, 7000);
   }
   function stop() {
+    if (live) trace('— 대화 끝 —');
     live = false; ready = false; wrapping = false; handle = null; queued = ''; clearInterval(swapTimer); clearTimeout(wrapTimer); clearTimeout(nudgeTimer);
     if (ws) { const s = ws; ws = null; try { s.close(); } catch {} }
     stopPlayback(); stopAudio();
@@ -773,6 +820,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   $('search').addEventListener('change', e => { cfg.search = e.target.checked; store.set('search', cfg.search); restart(); });
   $('model').addEventListener('change', e => { cfg.model = e.target.value.trim() || 'gemini-3.8-live'; e.target.value = cfg.model; store.set('model', cfg.model); restart(); });
   $('style').addEventListener('change', e => { setStyle(e.target.value); restart(); });
+  $('diagBtn').addEventListener('click', e => sendDiag(e.target));
   $('mode').value = cfg.mode;
   $('mode').addEventListener('change', e => {
     setMode(e.target.value);
