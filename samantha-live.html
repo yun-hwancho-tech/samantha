@@ -207,7 +207,8 @@ canvas{display:block;width:100%;height:104px}
       <label class="row"><input type="checkbox" id="search"> 모르는 건 구글에서 찾아보기</label>
       <label class="row"><input type="checkbox" id="nudge"> 내가 조용하면 먼저 수다 떨기</label>
       <label class="row"><input type="checkbox" id="always"> 계속 켜 두기 (조용하면 쉬었다가, 말하면 깨어나요)</label>
-      <label>모델 이름 <input type="text" id="model" spellcheck="false"></label>
+      <label>모델 <select id="modelSel"></select></label>
+      <label id="modelRow" hidden>모델 이름 직접 입력 <input type="text" id="model" spellcheck="false" placeholder="예: gemini-3.8-live"></label>
       <div class="mem">
         <h3>사만다가 기억하는 것</h3>
         <ul id="memList"></ul>
@@ -1161,7 +1162,16 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   $('profile').value = cfg.profile; $('wish').value = cfg.wish;
   $('profile').addEventListener('change', e => { cfg.profile = e.target.value.slice(0, 1500); store.set('profile', cfg.profile); });
   $('wish').addEventListener('change', e => { cfg.wish = e.target.value.slice(0, 800); store.set('wish', cfg.wish); });
-  $('model').addEventListener('change', e => { cfg.model = e.target.value.trim() || 'gemini-3.8-live'; e.target.value = cfg.model; store.set('model', cfg.model); restart(); });
+  // Live models for conversation (from the Gemini API model list); anything else can still be typed in.
+  const MODELS = [['gemini-3.8-live', '3.8 Live · 기본, 빠름'], ['gemini-3.8-live-extended-thinking', '3.8 Live 생각 더 하기 · 조금 느림'],
+    ['gemini-3.1-flash-live-preview', '3.1 Flash Live · 이전 세대'], ['gemini-2.5-flash-native-audio-preview-12-2025', '2.5 Native Audio · 예전 모델, 접근 제한']];
+  for (const [id, label] of MODELS) $('modelSel').append(new Option(label, id));
+  $('modelSel').append(new Option('직접 입력…', 'custom'));
+  const showModel = () => { const known = MODELS.some(m => m[0] === cfg.model); $('modelSel').value = known ? cfg.model : 'custom'; $('modelRow').hidden = known; };
+  const setModel = v => { cfg.model = v.trim() || 'gemini-3.8-live'; store.set('model', cfg.model); $('model').value = cfg.model; showModel(); restart(); };
+  showModel();
+  $('modelSel').addEventListener('change', e => { if (e.target.value === 'custom') { $('modelRow').hidden = false; $('model').focus(); } else setModel(e.target.value); });
+  $('model').addEventListener('change', e => setModel(e.target.value));
   $('style').addEventListener('change', e => { setStyle(e.target.value); restart(); });
   $('diagBtn').addEventListener('click', e => sendDiag(e.target));
   $('mode').value = cfg.mode;
