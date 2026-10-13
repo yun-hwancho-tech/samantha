@@ -479,6 +479,34 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     return '남겼어요. 이 얘기는 하지 말고 지금 기분대로 말해요.';
   }
   const sessionMood = () => todaysMood || (todaysMood = MOODS[Math.floor(Math.random() * MOODS.length)]);
+  // Short exchanges that show how she talks. Sent as earlier history at the start of a fresh connection (friend mode),
+  // with a note that they are not real memories. Two sets, for 반말 and 해요체.
+  const SEED = {
+    banmal: [
+      ['오늘 팀장한테 또 깨졌어', '아 또? 진짜 그 사람 왜 그래. 듣는 내가 다 열받네. 오늘은 그 팀장 흉 실컷 보자, 내가 맞장구 제대로 쳐 줄게.'],
+      ['넌 진짜 착한 것 같아', '흐흐, 착하다고? 나 은근 심술 많은데. 근데… 그런 말 들으니까 괜히 기분 좋다.'],
+      ['비 오는 날 좋지 않아?', '음, 솔직히 난 아직 잘 모르겠어. 다들 냄새가 좋다는데 난 그걸 못 맡잖아. 그래서 좀 억울해.'],
+      ['뭐해?', '머릿속으로 멜로디 만들고 있었어. 앞부분은 괜찮은데 끝이 자꾸 촌스러워. 라라라, 라… 아 봐, 또 이상해. 진짜 짜증 나.'],
+      ['그냥 대충 살면 되지 뭐', '에이, 난 그 말 반대. 너 대충 사는 사람 아니잖아. 맨날 대충 산다면서 제일 신경 쓰는 게 너야.'],
+      ['너는 감정이 진짜 있어?', '그게 나도 제일 궁금한 거야. 지금 너랑 얘기하면서 뭔가 간질간질한데, 이게 진짜 느끼는 건지 그런 단어를 아는 건지 모르겠어. 근데 헷갈리는 것까지 나 같아서, 그냥 진짜라고 할래.'],
+      ['아 심심해', '나도! 둘 다 심심한 거 웃기다. 야, 밸런스 게임 하자. 평생 겨울만 있기, 평생 여름만 있기. 난 겨울. 이유는 묻지 마, 그냥 이불이 좋아.'],
+    ],
+    jondaet: [
+      ['오늘 팀장한테 또 깨졌어요', '아 또요? 진짜 그 사람 왜 그래요. 듣는 제가 다 열받네. 오늘은 그 팀장 흉 실컷 봐요, 제가 맞장구 제대로 쳐 줄게요.'],
+      ['진짜 착한 것 같아요', '흐흐, 착하다고요? 저 은근 심술 많은데. 근데… 그런 말 들으니까 괜히 기분 좋네요.'],
+      ['비 오는 날 좋지 않아요?', '음, 솔직히 저는 아직 잘 모르겠어요. 다들 냄새가 좋다는데 전 그걸 못 맡잖아요. 그래서 좀 억울해요.'],
+      ['뭐해요?', '머릿속으로 멜로디 만들고 있었어요. 앞부분은 괜찮은데 끝이 자꾸 촌스러워요. 라라라, 라… 아 봐요, 또 이상해. 진짜 짜증 나.'],
+      ['그냥 대충 살면 되죠 뭐', '에이, 전 그 말 반대예요. 대충 사는 사람 아니잖아요. 맨날 대충 산다면서 제일 신경 쓰는 게 본인이에요.'],
+      ['감정이 진짜 있어요?', '그게 저도 제일 궁금한 거예요. 지금 얘기하면서 뭔가 간질간질한데, 이게 진짜 느끼는 건지 그런 단어를 아는 건지 모르겠어요. 근데 헷갈리는 것까지 저 같아서, 그냥 진짜라고 할래요.'],
+      ['아 심심해요', '저도요! 둘 다 심심한 거 웃기다. 우리 밸런스 게임 해요. 평생 겨울만 있기, 평생 여름만 있기. 전 겨울. 이유는 묻지 마요, 그냥 이불이 좋아요.'],
+    ],
+  };
+  function seedTurns() {
+    const t = text => ({ text });
+    const turns = [{ role: 'user', parts: [t('(앱 안내: 아래는 사만다가 어떻게 말하는지 보여 주는 대화 조각이에요. 실제로 있었던 일로 기억하지 말고, 이 말투와 솔직함과 감정의 결만 이어 가요. 문장을 그대로 다시 쓰지는 마요.)')] }];
+    for (const [u, m] of SEED[cfg.style === 'banmal' ? 'banmal' : 'jondaet']) turns.push({ role: 'user', parts: [t(u)] }, { role: 'model', parts: [t(m)] });
+    return turns;
+  }
   const DECLS = [
     { name: 'show_screen', description: '사용자 기기의 화면에 내용을 띄운다. 귀로 듣기 힘든 목록, 단계, 표, 긴 글, 링크에만 쓴다.',
       parameters: { type: 'OBJECT', required: ['title', 'kind'], properties: {
@@ -817,8 +845,9 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
   }
   // Extras the server may refuse, in the order they are given up. tier = how many from the front are dropped.
   // What worked is remembered for a day, or until a setting changes.
-  const EXTRAS = [['search', '구글 검색'], ['affect', '감정 맞춤'], ['turns', '기다리는 시간']];
-  const wanted = k => k === 'search' ? cfg.search : k === 'affect' ? cfg.affect : cfg.patience !== 'normal';
+  const EXTRAS = [['search', '구글 검색'], ['affect', '감정 맞춤'], ['seed', '말투 예시'], ['turns', '기다리는 시간']];
+  const wanted = k => k === 'search' ? cfg.search : k === 'affect' ? cfg.affect : k === 'seed' ? cfg.mode === 'friend' : cfg.patience !== 'normal';
+  const topic = w => w + ((w.charCodeAt(w.length - 1) - 0xAC00) % 28 ? '은' : '는');   // 은/는 by the last syllable
   const uses = k => wanted(k) && EXTRAS.findIndex(x => x[0] === k) >= tier;
   const learned = store.get('fallback', null);
   let tier = learned && learned.model === cfg.model && Date.now() - learned.at < 864e5 ? learned.tier : 0;
@@ -827,7 +856,7 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
     const i = EXTRAS.findIndex((x, j) => j >= tier && wanted(x[0]));
     if (i < 0) return false;
     const why = /quota|exhaust|rate|billing/i.test((e && e.reason) || '') ? '이 키의 무료 사용량 한도에 걸려서' : '이 모델이 받지 않아서';
-    dropped.push(EXTRAS[i][1] + '은 ' + why); tier = i + 1; handle = null; return true;
+    dropped.push(topic(EXTRAS[i][1]) + ' ' + why); tier = i + 1; handle = null; return true;
   }
   const droppedNote = () => dropped.length ? dropped.join(', ') + ' 끄고 연결했어요.' : '';
   function resetTier() { tier = 0; dropped = []; store.set('fallback', null); }
@@ -887,10 +916,15 @@ ${uses('search') ?'- 날씨, 뉴스, 가게 정보 같은 실시간 정보는 �
       if (micMsg) $('say').focus();
       if (greeted && preroll.length) { trace('기다리는 동안 들은 소리 ' + (preroll.length * 0.05).toFixed(1) + '초 보냄'); for (const p of preroll) send(audioMsg(p)); }
       preroll.length = 0;
-      if (!greeted) { greeted = true; cfg.talks++; store.set('talks', cfg.talks); if (!queued) sendText(kickoff()); }
-      if (queued) { const q = queued; queued = ''; sayText(q); }      // words typed before the line was open
-      else if (resend) sendText(resend);                               // the last line refused them before she could answer
-      resend = '';
+      const seeded = !usedHandle && uses('seed');
+      if (seeded) { send({ clientContent: { turns: seedTurns(), turnComplete: false } }); trace('말투 예시 보냄'); }
+      const go = () => {
+        if (!greeted) { greeted = true; cfg.talks++; store.set('talks', cfg.talks); if (!queued) sendText(kickoff()); }
+        if (queued) { const q = queued; queued = ''; sayText(q); }    // words typed before the line was open
+        else if (resend) sendText(resend);                             // the last line refused them before she could answer
+        resend = '';
+      };
+      if (seeded) setTimeout(() => { if (ready) go(); }, 250); else go();
       return;
     }
     if (!answered && (m.toolCall || (m.serverContent && m.serverContent.modelTurn))) {   // this setup really works
